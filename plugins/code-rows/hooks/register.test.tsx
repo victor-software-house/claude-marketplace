@@ -198,6 +198,23 @@ test('a folded group names the tools each script called, between its script and 
   await ui.unmount()
 })
 
+test('a long result drawn in full shows its first lines until its count line is clicked', async ($, on) => {
+  engine(on)
+  rows = []
+  const value = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join('\n')
+  const output = { code: script(2), result: value, stdout: '', stderr: '' }
+  const ui = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolUse', requestId: 'tu40', props: { ...call(script(2)), tool_use_id: 'tu40', isExpanded: true, output } })
+  const codes = async () => (await ui.findAll({ type: 'Code' })).map(found => found.text)
+  expect((await codes())[1]?.split('\n').length).toBe(12)
+  expect((await ui.find({ type: 'Button', key: 'more-value' }))?.text).toBe('… +8 lines · click to show all')
+  await ui.press({ key: 'more-value' })
+  expect((await codes())[1]).toBe(value)
+  expect((await ui.find({ type: 'Button', key: 'more-value' }))?.text).toBe('click to show less')
+  await ui.press({ key: 'more-value' })
+  expect((await codes())[1]?.split('\n').length).toBe(12)
+  await ui.unmount()
+})
+
 test('a group without a Code call is left to the engine', async ($, on) => {
   engine(on)
   const ui = await $.ui.mount({

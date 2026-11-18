@@ -3,6 +3,10 @@ export type Settled = { logs?: string; value: string; error: string }
 
 declare module 'claude-code' {
   interface PluginState {
-    'code-rows': { settled: Record<string, Settled> }
+    'code-rows': {
+      settled: Record<string, Settled>
+      /** Whether a row drawn in full shows each part of its result whole, as a click on its count line asks. */
+      shown: StateFamily<boolean>
+    }
   }
 }
