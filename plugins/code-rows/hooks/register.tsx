@@ -1,4 +1,4 @@
-import { atom, read, update } from 'claude-code'
+import { atom, memberOf, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type { Settled } from '../types'
@@ -20,6 +20,8 @@ import type { Settled } from '../types'
 
 const PREVIEW = 6
 const OUTCOME_PREVIEW = 3
+/** How many lines of each part of a result a row drawn in full shows until it is clicked. */
+const FULL_PREVIEW = 12
 /** How many of a script's tool calls a folded group's trail names. */
 const TRAIL_PREVIEW = 3
 /** The input fields that name what a tool call was about, in the order a trail looks for them. */
@@ -51,6 +53,7 @@ type Layout = {
 const INNER_ROW = 'repl_'
 
 const settled = atom({ plugin: 'code-rows', key: 'settled' } as const, {})
+const shown = atom({ plugin: 'code-rows', key: 'shown' } as const, false)
 
 const EVENT = /<event\b([^>]*)>([\s\S]*?)<\/event>/g
 const attr = (attrs: string, name: string) => new RegExp(`\\b${name}="([^"]*)"`).exec(attrs)?.[1]
@@ -128,7 +131,9 @@ const dotOf = (call: Call, outcome: Outcome | undefined) => {
   return call.isErrored || call.isInterrupted || (outcome?.error ?? '') !== '' ? 'error' : 'success'
 }
 
-type Table = Pick<ElementTable, 'Box' | 'Text' | 'Code'>
+type Table = Pick<ElementTable, 'Box' | 'Text' | 'Code' | 'Button'>
+/** A row drawn in full: whether its result shows whole, and the press that flips it. */
+type Fold = { isShown: boolean; toggle: () => Promise<void> }
 
 const gutter = ({ Box, Text }: Table, mark: string, color: 'error' | undefined, ...body: (RenderElement | false)[]) => (
   <Box flexDirection="row">
@@ -141,20 +146,32 @@ const gutter = ({ Box, Text }: Table, mark: string, color: 'error' | undefined, 
 
 const more = ({ Text }: Table, hidden: number) => hidden > 0 && <Text dimColor>{`… +${hidden} lines (ctrl+o to expand)`}</Text>
 
+/** The count line under a cut part of a result: in a row drawn in full, a click shows the part whole, or cuts it again. */
+const moreOrToggle = (table: Table, part: string, hidden: number, fold: Fold | undefined) => {
+  if (fold === undefined) return more(table, hidden)
+  if (hidden === 0 && !fold.isShown) return false
+  const { Button } = table
+  const label = fold.isShown ? 'click to show less' : `… +${hidden} lines · click to show all`
+  return <Button key={`more-${part}`} plain dimColor label={label} onPress={fold.toggle} />
+}
+
 /**
  * What the call logged (▸, with `logs`), returned (→) or threw (✘), cut unless `whole`; the error left out
  * when `errors` is false.
  */
-function outcomeRows(table: Table, outcome: Outcome | undefined, whole: boolean, errors: boolean, logs: boolean): (RenderElement | false)[] {
+function outcomeRows(table: Table, outcome: Outcome | undefined, fold: Fold | undefined, errors: boolean, logs: boolean): (RenderElement | false)[] {
   const { Text, Code } = table
-  const logged = cut(logs ? (outcome?.logs ?? '') : '', OUTCOME_PREVIEW, whole)
-  const value = cut(outcome?.value ?? '', OUTCOME_PREVIEW, whole)
+  const whole = fold?.isShown === true
+  const limit = fold === undefined ? OUTCOME_PREVIEW : FULL_PREVIEW
+  const logged = cut(logs ? (outcome?.logs ?? '') : '', limit, whole)
+  const value = cut(outcome?.value ?? '', limit, whole)
   const [headline = '', ...detail] = (errors ? (outcome?.error ?? '') : '').split('\n')
-  const error = cut(detail.join('\n'), OUTCOME_PREVIEW - 1, whole)
+  const error = cut(detail.join('\n'), limit - 1, whole)
   return [
-    logged.shown.length > 0 && gutter(table, '▸', undefined, <Text dimColor>{logged.shown.join('\n')}</Text>, more(table, logged.hidden)),
+    logged.shown.length > 0 &&
+      gutter(table, '▸', undefined, <Text dimColor>{logged.shown.join('\n')}</Text>, moreOrToggle(table, 'logs', logged.hidden, fold)),
     value.shown.length > 0 &&
-      gutter(table, '→', undefined, <Code source={value.shown.join('\n')} language="javascript" />, more(table, value.hidden)),
+      gutter(table, '→', undefined, <Code source={value.shown.join('\n')} language="javascript" />, moreOrToggle(table, 'value', value.hidden, fold)),
     headline !== '' &&
       gutter(
         table,
@@ -162,7 +179,7 @@ function outcomeRows(table: Table, outcome: Outcome | undefined, whole: boolean,
         'error',
         <Text color="error">{headline}</Text>,
         error.shown.length > 0 && <Text dimColor>{error.shown.join('\n')}</Text>,
-        more(table, error.hidden),
+        moreOrToggle(table, 'error', error.hidden, fold),
       ),
   ]
 }
@@ -181,7 +198,8 @@ function codeRow(
   background: Record<string, Settled>,
   ownOutcome: boolean,
   errors: boolean,
-  trail: readonly string[] = [],
+  trail: readonly string[],
+  fold: Fold | undefined,
 ): RenderElement {
   const { Box, Text, Code } = table
   const outcome = outcomeOf(call, background)
@@ -199,7 +217,7 @@ function codeRow(
       {trail.length > 0 &&
         gutter(table, '·', undefined, <Text dimColor>{trail.slice(0, TRAIL_PREVIEW).join('\n')}</Text>, trail.length > TRAIL_PREVIEW && <Text dimColor>{`… +${trail.length - TRAIL_PREVIEW} more`}</Text>)}
       {errors && outcome?.pending && gutter(table, '…', undefined, <Text dimColor>running in the background</Text>)}
-      {ownOutcome && outcomeRows(table, outcome, whole, errors, errors)}
+      {ownOutcome && outcomeRows(table, outcome, fold, errors, errors)}
     </Box>
   )
 }
@@ -208,7 +226,7 @@ function codeRow(
  * The row that ends a script's trail: after the rows of the tools it called, the call's summary with
  * what it returned or threw, so the result reads as the script's and not the last tool's.
  */
-function resultRow(table: Table, call: Call, script: Script, background: Record<string, Settled>, whole: boolean, logs: boolean): RenderElement | false {
+function resultRow(table: Table, call: Call, script: Script, background: Record<string, Settled>, fold: Fold | undefined, logs: boolean): RenderElement | false {
   const { Box, Text } = table
   const outcome = outcomeOf(call, background)
   if (outcome === undefined || outcome.pending) return false
@@ -223,7 +241,7 @@ function resultRow(table: Table, call: Call, script: Script, background: Record<
           <Text dimColor>{failed ? 'failed' : 'returned'}</Text>
         </Text>
       </Box>
-      {outcomeRows(table, outcome, whole, true, logs)}
+      {outcomeRows(table, outcome, fold, true, logs)}
     </Box>
   )
 }
@@ -234,7 +252,7 @@ async function withOutcome(
   table: Table,
   id: string,
   background: Record<string, Settled>,
-  whole: boolean,
+  fold: Fold | undefined,
   logs: boolean,
   row: Promise<RenderElement>,
 ): Promise<RenderElement> {
@@ -246,7 +264,7 @@ async function withOutcome(
   return (
     <Box flexDirection="column">
       {await row}
-      {resultRow(table, call, script, background, whole, logs)}
+      {resultRow(table, call, script, background, fold, logs)}
     </Box>
   )
 }
@@ -267,6 +285,13 @@ function textsOf(content: unknown): string[] {
 }
 
 let layout: Layout | undefined
+
+/** For a row drawn in full, whether its result shows whole, read so a click redraws it, and the press that flips it. */
+async function foldFor($: EngineInterface, e: { requestId: string }, whole: boolean): Promise<Fold | undefined> {
+  if (!whole) return undefined
+  const member = memberOf(shown, e)
+  return { isShown: await read($, member), toggle: async () => void (await update($, member, isShown => !isShown)) }
+}
 
 /**
  * The session's layout around `id` and every result known: the events its messages carry, and those
@@ -346,7 +371,7 @@ export const register: Register = on => {
     const { Box } = table
     return (
       <Box flexDirection="column">
-        {rows.map(({ call, script, trail }) => codeRow(table, call, script, false, background, true, false, trail))}
+        {rows.map(({ call, script, trail }) => codeRow(table, call, script, false, background, true, false, trail, undefined))}
         {await next(e)}
       </Box>
     )
@@ -365,7 +390,7 @@ export const register: Register = on => {
     if (CODE_TOOLS.has(e.props.tool)) {
       const script = scriptOf(e.props.input)
       if (script === undefined) return next(e)
-      return codeRow(table, e.props, script, whole, background, !placed.lastInner.has(id), true)
+      return codeRow(table, e.props, script, whole, background, !placed.lastInner.has(id), true, [], await foldFor($, e, whole))
     }
     return next(e)
   })
@@ -381,7 +406,7 @@ export const register: Register = on => {
     const table = $.ui.resolve(e)
     if (id.startsWith(ERROR_ROW)) return drawnOnCall(errorOf(e.props.output), background) ? <table.Box /> : next(e)
     const whole = e.props.isExpanded !== false
-    if (id.startsWith(INNER_ROW)) return withOutcome(placed, table, id, background, whole, true, next(e))
+    if (id.startsWith(INNER_ROW)) return withOutcome(placed, table, id, background, await foldFor($, e, whole), true, next(e))
     return e.props.isErrored ? <table.Box /> : next(e)
   })
 }

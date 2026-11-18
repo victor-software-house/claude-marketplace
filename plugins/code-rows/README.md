@@ -12,6 +12,7 @@ What the call returned (`→`) or threw (`✘`) draws where the script finished,
 - The transcript folds a script's calls into one group: each script lists the tools it called (`· Read demo.md`), then its value.
   Claude Code's count line under the group keeps showing each error.
 
+In ctrl+o, each part of a long result shows its first 12 lines, and a click on its count line shows it whole.
 Results come from the events in the session's messages, so a resumed session draws them too.
 
 - In the transcript, the first six lines of the script and the first lines of each result, then `… +N lines (ctrl+o to expand)`.
