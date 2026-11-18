@@ -1,0 +1,16 @@
+{
+  "name": "victor-software-house",
+  "owner": {
+    "name": "Victor Software House"
+  },
+  "metadata": {
+    "description": "Public Claude Code plugins from Victor Software House"
+  },
+  "plugins": [
+    {
+      "name": "code-rows",
+      "source": "./plugins/code-rows",
+      "description": "Shows Code Mode scripts in the transcript, as Write shows a file"
+    }
+  ]
+}
