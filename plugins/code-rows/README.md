@@ -5,11 +5,14 @@ The transcript folds those calls into a count line, and the ctrl+o view shows ea
 code-rows draws each Code call the way Write draws a file it creates:  
 a `Code(summary)` header, coloured by the call's state, and the script highlighted as JavaScript under it.
 
-What the call returned (`→`) or threw (`✘`) draws where the script finished, in execution order.
-For a script that called tools, it is a row of its own after those tools' rows, naming the call, such as `⏺ Code(Count lines in demo.md) returned`.
-For a script that called none, it sits under the script.
-Under ctrl+o, the script's logs (`▸`) show too.
-In a folded group, Claude Code's count line keeps showing each error, so the row there shows the value alone.
+What the call returned (`→`) or threw (`✘`) draws where the script finished, in execution order:
+
+- In ctrl+o, a script that called tools gets a row of its own after the last tool's result, naming the call, such as `⏺ Code(Count lines in demo.md) returned`.
+- A script that called none shows its logs (`▸`), then its value or error, under the script.
+- The transcript folds a script's calls into one group: each script lists the tools it called (`· Read demo.md`), then its value.
+  Claude Code's count line under the group keeps showing each error.
+
+Results come from the events in the session's messages, so a resumed session draws them too.
 
 - In the transcript, the first six lines of the script and the first lines of each result, then `… +N lines (ctrl+o to expand)`.
 - Under ctrl+o or `--verbose`, all of them.

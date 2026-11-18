@@ -1,4 +1,4 @@
-import type { On, SessionMessage } from 'claude-code'
+import type { ApiMessage, On, SessionMessage } from 'claude-code'
 import { expect, test, type Engine } from 'claude-code/testing'
 
 /** A Code call's script of `n` numbered lines. */
@@ -19,11 +19,13 @@ function engine(on: On) {
     return <Text>engine</Text>
   })
   on('prompt.attachment', ($, e) => ({ text: e.text }))
-  on('session.messages', () => ({ value: rows }))
+  on('session.messages', ($, e) => ({ value: e.as === 'api' ? api : rows }))
 }
 
 /** The session's rows, as `$.session.messages()` answers them; a test sets them before drawing. */
 let rows: SessionMessage[] = []
+/** The session in Messages API form, where a poll's tool result carries the repl-eval events. */
+let api: ApiMessage[] = []
 
 /** A poll_events attachment carrying repl-eval events, as the engine sends them to the model. */
 const events = (...bodies: [number, string][]) =>
@@ -77,17 +79,17 @@ test('a row drawn in full shows the whole script on every surface', async ($, on
   }
 })
 
-test('a call that called no tool draws its value under its script, and no logs', async ($, on) => {
+test('a call that called no tool draws its logs, then its value, under its script', async ($, on) => {
   engine(on)
   rows = []
   const output = { code: script(2), result: '{ lines: 18 }', stdout: 'reading', stderr: '' }
   const ui = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolUse', props: { ...call(script(2)), isExpanded: false, output } })
-  expect(await ui.find({ type: 'Text', text: /reading/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: 'reading' }))?.text).toBeTruthy()
   expect((await ui.findAll({ type: 'Code' })).map(found => found.text)).toEqual([script(2), '{ lines: 18 }'])
   await ui.unmount()
 })
 
-test('the value draws under the last row of the tools the script called, not under the script', async ($, on) => {
+test('the result draws under the last result row of the tools the script called, not under the script', async ($, on) => {
   engine(on)
   const output = { code: script(2), result: '{ lines: 19 }', stdout: 'reading', stderr: '' }
   rows = [
@@ -98,25 +100,21 @@ test('the value draws under the last row of the tools the script called, not und
   const own = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolUse', props: { ...call(script(2)), tool_use_id: 'tu9', isExpanded: true, output } })
   expect((await own.findAll({ type: 'Code' })).map(found => found.text)).toEqual([script(2)])
   await own.unmount()
-  const inner = (id: string) =>
-    $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolUse', props: { tool_use_id: id, tool: 'Read', input: { file_path: 'demo.md' }, isRunning: false, isErrored: false, isInterrupted: false, isExpanded: false, output: {} } })
-  const first = await inner('repl_a')
+  const result = (id: string) =>
+    $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolResult', props: { tool_use_id: id, tool: 'Read', output: {}, isErrored: false, isExpanded: true } })
+  const first = await result('repl_a')
   expect((await first.findAll({ type: 'Code' })).length).toBe(0)
   expect((await first.find({ type: 'Text', text: 'engine' }))?.text).toBeTruthy()
   await first.unmount()
-  const last = await inner('repl_b')
+  const last = await result('repl_b')
   expect((await last.find({ type: 'Text', text: 'engine' }))?.text).toBeTruthy()
   expect((await last.find({ type: 'Text', text: 'returned' }))?.text).toBeTruthy()
+  expect((await last.find({ type: 'Text', text: 'reading' }))?.text).toBeTruthy()
   expect((await last.findAll({ type: 'Code' })).map(found => found.text)).toEqual(['{ lines: 19 }'])
   await last.unmount()
 
-  // ctrl+o draws the tool's result as a row of its own: the trail's end goes under it, with the logs,
-  // and the tool's header row then leaves it out.
-  const result = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolResult', props: { tool_use_id: 'repl_b', tool: 'Read', output: {}, isErrored: false, isExpanded: true } })
-  expect((await result.find({ type: 'Text', text: 'engine' }))?.text).toBeTruthy()
-  expect((await result.findAll({ type: 'Code' })).map(found => found.text)).toEqual(['{ lines: 19 }'])
-  await result.unmount()
-  const header = await inner('repl_b')
+  // The tool's own row draws only what Claude Code draws there.
+  const header = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolUse', props: { tool_use_id: 'repl_b', tool: 'Read', input: { file_path: 'other.md' }, isRunning: false, isErrored: false, isInterrupted: false, isExpanded: true, output: {} } })
   expect((await header.findAll({ type: 'Code' })).length).toBe(0)
   await header.unmount()
 
@@ -149,7 +147,9 @@ test('a background call waits for its event, then draws what it left and hides C
 
   const failed = await mount(7)
   expect(await failed.find({ type: 'Text', text: 'running in the background' })).toBeUndefined()
-  expect(await failed.find({ type: 'Text', text: 'about to fail' })).toBeUndefined()
+  const texts = (await failed.findAll({ type: 'Text' })).map(found => found.text)
+  expect(texts.indexOf('about to fail')).toBeGreaterThan(-1)
+  expect(texts.indexOf('about to fail')).toBeLessThan(texts.indexOf('Error: boom: demo failure'))
   expect((await failed.find({ type: 'Text', text: 'Error: boom: demo failure' }))?.text).toBeTruthy()
   await failed.unmount()
   const worked = await mount(8)
@@ -164,6 +164,38 @@ test('a background call waits for its event, then draws what it left and hides C
   const unknown = await row('Error: something this mod never saw')
   expect((await unknown.find({ type: 'Text', text: 'engine' }))?.text).toBeTruthy()
   await unknown.unmount()
+})
+
+test('a resumed session draws a background call’s result from the events its messages carry', async ($, on) => {
+  engine(on)
+  rows = []
+  api = [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'poll_1', content: events([31, '<log>about to fail</log>\n<error>Error: boom: demo failure</error>']) }] }]
+  const ui = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolUse', props: { ...call(script(2)), tool_use_id: 'tu31', isExpanded: true, output: dispatched(31) } })
+  expect(await ui.find({ type: 'Text', text: 'running in the background' })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: 'Error: boom: demo failure' }))?.text).toBeTruthy()
+  await ui.unmount()
+  const row = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolResult', props: { tool_use_id: 'repl-error-31', tool: 'REPL', output: { error: 'Error: boom: demo failure' }, isErrored: true, isExpanded: true } })
+  expect(await row.find({ type: 'Text', text: 'engine' })).toBeUndefined()
+  await row.unmount()
+  api = []
+})
+
+test('a folded group names the tools each script called, between its script and its value', async ($, on) => {
+  engine(on)
+  const output = { code: script(2), result: '{ lines: 19 }', stdout: '', stderr: '' }
+  const inner = (id: string, tool: string, input: Record<string, unknown>) => ({ tool_use_id: id, tool, input, isRunning: false, isErrored: false, isInterrupted: false })
+  const calls = [
+    { ...call(script(2)), output },
+    inner('repl_a', 'Read', { file_path: '/tmp/work/demo.md' }),
+    inner('repl_b', 'Bash', { command: 'wc -l demo.md\necho done' }),
+    inner('repl_c', 'Grep', { pattern: 'Heading' }),
+    inner('repl_d', 'Read', { file_path: '/tmp/work/other.md' }),
+  ]
+  const ui = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolGroup', props: { calls, isActive: false, isExpanded: false } })
+  expect((await ui.find({ type: 'Text', text: 'Read demo.md\nBash wc -l demo.md\nGrep Heading' }))?.text).toBeTruthy()
+  expect((await ui.find({ type: 'Text', text: '… +1 more' }))?.text).toBeTruthy()
+  expect((await ui.findAll({ type: 'Code' })).map(found => found.text)).toEqual([script(2), '{ lines: 19 }'])
+  await ui.unmount()
 })
 
 test('a group without a Code call is left to the engine', async ($, on) => {
