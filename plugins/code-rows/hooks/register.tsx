@@ -20,6 +20,10 @@ import type { Settled } from '../types'
 
 const PREVIEW = 6
 const OUTCOME_PREVIEW = 3
+/** How many of a script's tool calls a folded group's trail names. */
+const TRAIL_PREVIEW = 3
+/** The input fields that name what a tool call was about, in the order a trail looks for them. */
+const SUBJECT_FIELDS = ['file_path', 'path', 'command', 'pattern', 'url', 'query', 'description']
 /** How many of the session's newest rows a layout reads. */
 const ROWS_READ = 1000
 const CODE_TOOLS = new Set(['REPL', 'Eval'])
@@ -38,6 +42,8 @@ type Layout = {
   scripts: Map<string, Script>
   codeOf: Map<string, string>
   lastInner: Map<string, string>
+  /** The repl-eval events the session's messages carry, by eval number. */
+  events: Record<string, Settled>
   settledCount: number
 }
 
@@ -99,6 +105,16 @@ function outcomeOf(call: Call, background: Record<string, Settled>): Outcome | u
   }
 }
 
+/** A trail line for a tool call: its name and what it was about, a path as its last part. */
+function trailLine(tool: string, input: unknown): string {
+  const record = typeof input === 'object' && input !== null ? input : {}
+  const subject = SUBJECT_FIELDS.map(name => (name in record ? Reflect.get(record, name) : undefined)).find(value => typeof value === 'string')
+  if (typeof subject !== 'string') return tool
+  const line = (subject.split('\n')[0] ?? '').trim()
+  const shown = /^[~/]/.test(line) && !line.includes(' ') ? (line.split('/').pop() ?? line) : line
+  return `${tool} ${shown.length > 60 ? `${shown.slice(0, 59)}…` : shown}`
+}
+
 /** `text`'s lines cut to `limit` unless `whole`, with the count of those left out. */
 const cut = (text: string, limit: number, whole: boolean) => {
   const lines = text === '' ? [] : text.split('\n')
@@ -157,7 +173,16 @@ function outcomeRows(table: Table, outcome: Outcome | undefined, whole: boolean,
  * a folded group, whose count line shows each error and whose rows are not drawn again once a
  * background call settles, so no waiting note goes there either.
  */
-function codeRow(table: Table, call: Call, script: Script, whole: boolean, background: Record<string, Settled>, ownOutcome: boolean, errors: boolean): RenderElement {
+function codeRow(
+  table: Table,
+  call: Call,
+  script: Script,
+  whole: boolean,
+  background: Record<string, Settled>,
+  ownOutcome: boolean,
+  errors: boolean,
+  trail: readonly string[] = [],
+): RenderElement {
   const { Box, Text, Code } = table
   const outcome = outcomeOf(call, background)
   const source = cut(script.code, PREVIEW, whole)
@@ -171,8 +196,10 @@ function codeRow(table: Table, call: Call, script: Script, whole: boolean, backg
         </Text>
       </Box>
       {gutter(table, '⎿', undefined, <Code source={source.shown.join('\n')} language="javascript" />, more(table, source.hidden))}
+      {trail.length > 0 &&
+        gutter(table, '·', undefined, <Text dimColor>{trail.slice(0, TRAIL_PREVIEW).join('\n')}</Text>, trail.length > TRAIL_PREVIEW && <Text dimColor>{`… +${trail.length - TRAIL_PREVIEW} more`}</Text>)}
       {errors && outcome?.pending && gutter(table, '…', undefined, <Text dimColor>running in the background</Text>)}
-      {ownOutcome && outcomeRows(table, outcome, whole, errors, false)}
+      {ownOutcome && outcomeRows(table, outcome, whole, errors, errors)}
     </Box>
   )
 }
@@ -203,7 +230,7 @@ function resultRow(table: Table, call: Call, script: Script, background: Record<
 
 /** `row` with, under it, the script's result row when it is the last row of the tools that script called. */
 async function withOutcome(
-  $: EngineInterface,
+  placed: Layout,
   table: Table,
   id: string,
   background: Record<string, Settled>,
@@ -211,7 +238,6 @@ async function withOutcome(
   logs: boolean,
   row: Promise<RenderElement>,
 ): Promise<RenderElement> {
-  const placed = await layoutFor($, id, Object.keys(background).length)
   const parent = placed.codeOf.get(id)
   const call = parent === undefined ? undefined : placed.calls.get(parent)
   const script = call === undefined ? undefined : placed.scripts.get(parent ?? '')
@@ -225,13 +251,32 @@ async function withOutcome(
   )
 }
 
-// In ctrl+o, each row a script added draws its result as a ToolResult row of its own, after the
-// tool's header; in the default view the ToolUse row holds both. Neither tells which view draws it,
-// so a ToolResult hook marks its id, and the ToolUse row of a marked id leaves the trail's end to it.
-// A folded group or a compact closing line is drawn only in the default view, which clears the marks.
-const resultDrawn = new Set<string>()
+// In ctrl+o, Claude Code draws each tool row's result as a row of its own, after the tool's
+// header, so the end of a script's trail goes under the last tool's result row. The default view
+// folds a script's calls into one group, which draws the trail itself.
+
+/** The texts of a message's content: its text blocks and its tool results', where events arrive. */
+function textsOf(content: unknown): string[] {
+  if (typeof content === 'string') return [content]
+  if (!Array.isArray(content)) return []
+  return content.flatMap((block: unknown) => {
+    if (typeof block !== 'object' || block === null) return []
+    if ('text' in block && typeof block.text === 'string') return [block.text]
+    return 'content' in block ? textsOf(block.content) : []
+  })
+}
 
 let layout: Layout | undefined
+
+/**
+ * The session's layout around `id` and every result known: the events its messages carry, and those
+ * the attachment hook kept since, which also redraws the rows that read them.
+ */
+async function known($: EngineInterface, id: string): Promise<{ placed: Layout; background: Record<string, Settled> }> {
+  const kept = await read($, settled)
+  const placed = await layoutFor($, id, Object.keys(kept).length)
+  return { placed, background: { ...placed.events, ...kept } }
+}
 
 /**
  * The session's Code calls and the rows of the tools each called, read again when a row is not in the
@@ -240,7 +285,12 @@ let layout: Layout | undefined
 async function layoutFor($: EngineInterface, id: string, settledCount: number): Promise<Layout> {
   if (layout && layout.known.has(id) && layout.settledCount === settledCount) return layout
   const rows = await $.session.messages({ last: ROWS_READ })
-  const next: Layout = { known: new Set(), calls: new Map(), scripts: new Map(), codeOf: new Map(), lastInner: new Map(), settledCount }
+  const api = await $.session.messages({ as: 'api', last: ROWS_READ })
+  const events: Record<string, Settled> = {}
+  for (const text of Array.isArray(api) ? api.flatMap(message => textsOf(message.content)) : []) {
+    if (text.includes('kind="repl-eval"')) Object.assign(events, eventsOf(text))
+  }
+  const next: Layout = { known: new Set(), calls: new Map(), scripts: new Map(), codeOf: new Map(), lastInner: new Map(), events, settledCount }
   let current: string | undefined
   for (const row of Array.isArray(rows) ? rows : []) {
     for (const use of row.toolUses) {
@@ -283,70 +333,55 @@ export const register: Register = on => {
   // returned; the count line shows each error. Drawn only in the default view.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     if (e.component !== 'ToolGroup' || e.props.isExpanded) return next(e)
-    resultDrawn.clear()
-    const rows = e.props.calls.flatMap(call => {
+    // A call Code Mode added for a tool a script called follows that script's call in the group.
+    const rows: { call: (typeof e.props.calls)[number]; script: Script; trail: string[] }[] = []
+    for (const call of e.props.calls) {
       const script = CODE_TOOLS.has(call.tool) ? scriptOf(call.input) : undefined
-      return script ? [{ call, script }] : []
-    })
+      if (script) rows.push({ call, script, trail: [] })
+      else if (call.tool_use_id?.startsWith(INNER_ROW)) rows.at(-1)?.trail.push(trailLine(call.tool, call.input))
+    }
     if (rows.length === 0) return next(e)
-    const background = await read($, settled)
+    const { background } = await known($, rows[0]?.call.tool_use_id ?? '')
     const table = $.ui.resolve(e)
     const { Box } = table
     return (
       <Box flexDirection="column">
-        {rows.map(({ call, script }) => codeRow(table, call, script, false, background, true, false))}
+        {rows.map(({ call, script, trail }) => codeRow(table, call, script, false, background, true, false, trail))}
         {await next(e)}
       </Box>
     )
   })
 
-  // The turn's closing line in its compact form is drawn only in the default view.
-  on('ui.render', { component: 'TurnDuration' }, async ($, e, next) => {
-    if (e.component === 'TurnDuration' && e.props.isExpanded === false) resultDrawn.clear()
-    return next(e)
-  })
-
   // A call drawn as its own row: the engine draws Code Mode's script collapsed behind a click there.
-  // The row that ends a script's trail (the call itself, or the last tool it called) draws its result.
+  // A script that called no tool draws what it left under itself: its logs, then its value or error.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     if (e.component !== 'ToolUse') return next(e)
     const id = e.props.tool_use_id
     if (!CODE_TOOLS.has(e.props.tool) && !id.startsWith(INNER_ROW)) return next(e)
-    const background = await read($, settled)
+    const { placed, background } = await known($, id)
     const table = $.ui.resolve(e)
     if (id.startsWith(ERROR_ROW)) return drawnOnCall(errorOf(e.props.output), background) ? <table.Box /> : next(e)
     const whole = e.props.isExpanded === true
     if (CODE_TOOLS.has(e.props.tool)) {
       const script = scriptOf(e.props.input)
       if (script === undefined) return next(e)
-      const placed = await layoutFor($, id, Object.keys(background).length)
-      return codeRow(table, e.props, script, whole, background, !placed.lastInner.has(id) && !resultDrawn.has(id), true)
+      return codeRow(table, e.props, script, whole, background, !placed.lastInner.has(id), true)
     }
-    if (resultDrawn.has(id)) return next(e)
-    return withOutcome($, table, id, background, whole, false, next(e))
+    return next(e)
   })
 
-  // A result row of its own, which only ctrl+o draws: the end of a script's trail goes under it, with
-  // the script's logs. Claude Code's error line for a Code call is hidden, as the trail shows it.
+  // A result row of its own, which ctrl+o draws: under the last tool a script called goes the end of
+  // that script's trail, with its logs. Claude Code's error line for a Code call is hidden, as the
+  // call's own row or its trail shows it.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     if (e.component !== 'ToolResult') return next(e)
     const id = e.props.tool_use_id
     if (!CODE_TOOLS.has(e.props.tool) && !id.startsWith(INNER_ROW)) return next(e)
-    const background = await read($, settled)
+    const { placed, background } = await known($, id)
     const table = $.ui.resolve(e)
     if (id.startsWith(ERROR_ROW)) return drawnOnCall(errorOf(e.props.output), background) ? <table.Box /> : next(e)
     const whole = e.props.isExpanded !== false
-    resultDrawn.add(id)
-    if (id.startsWith(INNER_ROW)) return withOutcome($, table, id, background, whole, true, next(e))
-    const placed = await layoutFor($, id, Object.keys(background).length)
-    const call = placed.calls.get(id)
-    const own = e.props.isErrored ? <table.Box /> : await next(e)
-    if (call === undefined || placed.lastInner.has(id)) return own
-    return (
-      <table.Box flexDirection="column">
-        {own}
-        {outcomeRows(table, outcomeOf(call, background), whole, true, true)}
-      </table.Box>
-    )
+    if (id.startsWith(INNER_ROW)) return withOutcome(placed, table, id, background, whole, true, next(e))
+    return e.props.isErrored ? <table.Box /> : next(e)
   })
 }
