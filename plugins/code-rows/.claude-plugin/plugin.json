@@ -1,7 +1,7 @@
 {
   "name": "code-rows",
-  "version": "0.0.5",
-  "description": "Draws each Code Mode call's script under its row, as Write draws a file: the first lines in the transcript, all of it under ctrl+o",
+  "version": "0.0.6",
+  "description": "Draws each Code Mode call's script and result under ctrl+o, as Write draws a file, and leaves the transcript's summaries as Claude Code draws them",
   "author": {
     "name": "Victor Software House"
   },
