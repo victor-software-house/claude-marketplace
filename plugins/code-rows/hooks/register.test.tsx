@@ -18,7 +18,14 @@ function engine(on: On) {
     const { Text } = $.ui.resolve(e)
     return <Text>engine</Text>
   })
+  on('prompt.attachment', ($, e) => ({ text: e.text }))
 }
+
+/** A poll_events attachment carrying repl-eval events, as the engine sends them to the model. */
+const events = (...bodies: [number, string][]) =>
+  bodies.map(([id, body]) => `<event nonce="n${id}" kind="repl-eval" at="2026-11-18T13:00:11.073Z" eval="${id}" ms="26" status="settled">\n${body}\n</event>`).join('\n')
+
+const dispatched = (id: number) => ({ code: script(2), result: `(dispatched #${id})`, stdout: '', stderr: '', evalId: id, asyncDispatched: true })
 
 const mountGroup = ($: Engine, code: string) =>
   $.ui.mount({
@@ -66,24 +73,56 @@ test('a row drawn in full shows the whole script on every surface', async ($, on
   }
 })
 
-test('results stay the engine’s: no value, dispatch note or error text under the script', async ($, on) => {
+test('a finished call draws its logs and its value under the script, marked apart', async ($, on) => {
   engine(on)
-  const outputs = [
-    { isErrored: false, output: { code: script(2), result: '{ lines: 18 }', stdout: 'reading', stderr: '' } },
-    { isErrored: false, output: { code: script(2), result: '(dispatched #1)', stdout: '', stderr: '', evalId: 1, asyncDispatched: true } },
-    { isErrored: true, output: { code: script(2), result: null, stdout: '', stderr: '', error: 'Error: boom' } },
-  ]
-  for (const { isErrored, output } of outputs) {
-    const ui = await $.ui.mount({
-      plugin: 'code-rows',
-      surface: 'terminal',
-      component: 'ToolUse',
-      props: { ...call(script(2)), isErrored, isExpanded: true, output },
-    })
-    for (const text of [/lines: 18/, /reading/, /dispatched/, /boom/]) expect(await ui.find({ type: 'Text', text })).toBeUndefined()
-    expect((await ui.findAll({ type: 'Code' })).map(found => found.text)).toEqual([script(2)])
-    await ui.unmount()
-  }
+  const output = { code: script(2), result: '{ lines: 18 }', stdout: 'reading', stderr: '' }
+  const ui = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolUse', props: { ...call(script(2)), isExpanded: false, output } })
+  expect((await ui.find({ type: 'Text', text: 'reading' }))?.text).toBeTruthy()
+  expect((await ui.find({ type: 'Text', text: /▸/ }))?.text).toBeTruthy()
+  expect((await ui.findAll({ type: 'Code' })).map(found => found.text)).toEqual([script(2), '{ lines: 18 }'])
+  await ui.unmount()
+})
+
+test('a failed call draws its error under its own script, and Claude Code’s line for it is hidden', async ($, on) => {
+  engine(on)
+  const output = { code: script(2), result: null, stdout: '', stderr: '', error: 'Error: boom\nThrown at line 2' }
+  const ui = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolUse', props: { ...call(script(2)), isErrored: true, isExpanded: true, output } })
+  expect((await ui.find({ type: 'Text', text: 'Error: boom' }))?.text).toBeTruthy()
+  expect((await ui.find({ type: 'Text', text: 'Thrown at line 2' }))?.text).toBeTruthy()
+  await ui.unmount()
+  const line = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolResult', props: { tool_use_id: 'tu1', tool: 'REPL', output, isErrored: true, isExpanded: true } })
+  expect(await line.find({ type: 'Text', text: 'engine' })).toBeUndefined()
+  await line.unmount()
+})
+
+test('a background call waits for its event, then draws what it left and hides Claude Code’s floating error row', async ($, on) => {
+  engine(on)
+  const mount = (id: number) =>
+    $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolUse', props: { ...call(script(2)), tool_use_id: `tu${id}`, isExpanded: true, output: dispatched(id) } })
+  const before = await mount(7)
+  expect((await before.find({ type: 'Text', text: 'running in the background' }))?.text).toBeTruthy()
+  await before.unmount()
+
+  const text = events([7, '<log>about to fail</log>\n<error>Error: boom: demo failure\nThrown at (statements quoted)</error>'], [8, '<result>{ n: 1 }</result>'])
+  expect(await $.prompt.attachment({ type: 'poll_events', text, origin: { kind: 'engine' } })).toEqual({ text })
+
+  const failed = await mount(7)
+  expect(await failed.find({ type: 'Text', text: 'running in the background' })).toBeUndefined()
+  expect((await failed.find({ type: 'Text', text: 'about to fail' }))?.text).toBeTruthy()
+  expect((await failed.find({ type: 'Text', text: 'Error: boom: demo failure' }))?.text).toBeTruthy()
+  await failed.unmount()
+  const worked = await mount(8)
+  expect((await worked.findAll({ type: 'Code' })).map(found => found.text)).toEqual([script(2), '{ n: 1 }'])
+  await worked.unmount()
+
+  const row = (error: string) =>
+    $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolResult', props: { tool_use_id: 'repl-error-1', tool: 'REPL', output: { error }, isErrored: true, isExpanded: true } })
+  const hidden = await row('Error: boom: demo failure')
+  expect(await hidden.find({ type: 'Text', text: 'engine' })).toBeUndefined()
+  await hidden.unmount()
+  const unknown = await row('Error: something this mod never saw')
+  expect((await unknown.find({ type: 'Text', text: 'engine' }))?.text).toBeTruthy()
+  await unknown.unmount()
 })
 
 test('a group without a Code call is left to the engine', async ($, on) => {

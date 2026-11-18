@@ -5,8 +5,11 @@ The transcript folds those calls into a count line, and the ctrl+o view shows ea
 code-rows draws each Code call the way Write draws a file it creates:  
 a `Code(summary)` header, coloured by the call's state, and the script highlighted as JavaScript under it.
 
-- In the transcript, the first six lines, then `… +N lines (ctrl+o to expand)`.
-- Under ctrl+o or `--verbose`, the whole script.
+Under the script, what the call left, each marked apart: its logs (`▸`), its value (`→`) or its error (`✘`).
+A call Code Mode runs in the background shows `running in the background` until its result arrives, and the result then draws under that call, not wherever it arrived.
+
+- In the transcript, the first six lines of the script and the first lines of each result, then `… +N lines (ctrl+o to expand)`.
+- Under ctrl+o or `--verbose`, all of them.
 
 It needs no other plugin, setting or file, and draws on every surface Claude Code renders mods on.
 
