@@ -49,24 +49,26 @@ const mountRow = ($: Engine, surface: 'terminal' | 'desktop', code: string, isEx
     props: { ...call(code), isExpanded },
   })
 
-test('a folded group draws the Code call above its own line, cut to six lines', async ($, on) => {
+test('a folded group is left to Claude Code, Code calls and all', async ($, on) => {
   engine(on)
   const ui = await mountGroup($, script(10))
-  expect((await ui.find({ type: 'Text', text: /^Code\(Count the lines\)$/ }))?.text).toBeTruthy()
-  const code = await ui.find({ type: 'Code' })
-  expect(code?.text).toContain('const line6 = 6;')
-  expect(code?.text).not.toContain('const line7')
-  expect((await ui.find({ type: 'Text', text: '… +4 lines (ctrl+o to expand)' }))?.text).toBeTruthy()
+  expect(await ui.find({ type: 'Code' })).toBeUndefined()
   expect((await ui.find({ type: 'Text', text: 'engine' }))?.text).toBeTruthy()
   await ui.unmount()
 })
 
-test('a short script draws whole with no count line', async ($, on) => {
+test('a row drawn short cuts its script to six lines, and a short script draws whole', async ($, on) => {
   engine(on)
-  const ui = await mountGroup($, script(3))
-  expect((await ui.find({ type: 'Code' }))?.text).toContain('const line3 = 3;')
-  expect(await ui.find({ type: 'Text', text: /lines \(ctrl\+o to expand\)/ })).toBeUndefined()
-  await ui.unmount()
+  const long = await mountRow($, 'terminal', script(10), false)
+  const code = await long.find({ type: 'Code' })
+  expect(code?.text).toContain('const line6 = 6;')
+  expect(code?.text).not.toContain('const line7')
+  expect((await long.find({ type: 'Text', text: '… +4 lines (ctrl+o to expand)' }))?.text).toBeTruthy()
+  await long.unmount()
+  const short = await mountRow($, 'terminal', script(3), false)
+  expect((await short.find({ type: 'Code' }))?.text).toContain('const line3 = 3;')
+  expect(await short.find({ type: 'Text', text: /lines \(ctrl\+o to expand\)/ })).toBeUndefined()
+  await short.unmount()
 })
 
 test('a row drawn in full shows the whole script on every surface', async ($, on) => {
@@ -180,24 +182,6 @@ test('a resumed session draws a background call’s result from the events its m
   api = []
 })
 
-test('a folded group names the tools each script called, between its script and its value', async ($, on) => {
-  engine(on)
-  const output = { code: script(2), result: '{ lines: 19 }', stdout: '', stderr: '' }
-  const inner = (id: string, tool: string, input: Record<string, unknown>) => ({ tool_use_id: id, tool, input, isRunning: false, isErrored: false, isInterrupted: false })
-  const calls = [
-    { ...call(script(2)), output },
-    inner('repl_a', 'Read', { file_path: '/tmp/work/demo.md' }),
-    inner('repl_b', 'Bash', { command: 'wc -l demo.md\necho done' }),
-    inner('repl_c', 'Grep', { pattern: 'Heading' }),
-    inner('repl_d', 'Read', { file_path: '/tmp/work/other.md' }),
-  ]
-  const ui = await $.ui.mount({ plugin: 'code-rows', surface: 'terminal', component: 'ToolGroup', props: { calls, isActive: false, isExpanded: false } })
-  expect((await ui.find({ type: 'Text', text: 'Read demo.md\nBash wc -l demo.md\nGrep Heading' }))?.text).toBeTruthy()
-  expect((await ui.find({ type: 'Text', text: '… +1 more' }))?.text).toBeTruthy()
-  expect((await ui.findAll({ type: 'Code' })).map(found => found.text)).toEqual([script(2), '{ lines: 19 }'])
-  await ui.unmount()
-})
-
 test('a long result drawn in full shows its first lines until its count line is clicked', async ($, on) => {
   engine(on)
   rows = []
@@ -212,18 +196,5 @@ test('a long result drawn in full shows its first lines until its count line is 
   expect((await ui.find({ type: 'Button', key: 'more-value' }))?.text).toBe('click to show less')
   await ui.press({ key: 'more-value' })
   expect((await codes())[1]?.split('\n').length).toBe(12)
-  await ui.unmount()
-})
-
-test('a group without a Code call is left to the engine', async ($, on) => {
-  engine(on)
-  const ui = await $.ui.mount({
-    plugin: 'code-rows',
-    surface: 'terminal',
-    component: 'ToolGroup',
-    props: { calls: [{ ...call(''), tool: 'Read', input: { file_path: '/x' } }], isActive: false, isExpanded: false },
-  })
-  expect(await ui.find({ type: 'Code' })).toBeUndefined()
-  expect((await ui.find({ type: 'Text', text: 'engine' }))?.text).toBeTruthy()
   await ui.unmount()
 })
