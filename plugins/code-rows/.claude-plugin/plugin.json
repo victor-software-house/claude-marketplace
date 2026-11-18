@@ -1,6 +1,6 @@
 {
   "name": "code-rows",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Draws each Code Mode call's script under its row, as Write draws a file: the first lines in the transcript, all of it under ctrl+o",
   "author": {
     "name": "Victor Software House"
